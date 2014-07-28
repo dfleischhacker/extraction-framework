@@ -51,6 +51,8 @@ extends PageNodeExtractor
     private val language = context.language.wikiCode
 
     private val logger = Logger.getLogger(classOf[AbstractExtractor].getName)
+    // we log all failed pages into an additional logger
+    private val failedPagesLogger = Logger.getLogger(classOf[AbstractExtractor].getName + "_failedPages")
 
     //private val apiParametersFormat = "uselang="+language+"&format=xml&action=parse&prop=text&title=%s&text=%s"
     private val apiParametersFormat = "uselang="+language+"&format=xml&action=query&prop=extracts&exintro=&explaintext=&titles=%s"
@@ -145,6 +147,32 @@ extends PageNodeExtractor
         }
         catch
         {
+          case ex: java.net.SocketTimeoutException => {
+            // The web server may still be trying to render the page. If we send new requests
+            // at once, there will be more and more tasks running in the web server and the
+            // system eventually becomes overloaded. So we wait a moment. The higher the load,
+            // the longer we wait.
+
+            var loadFactor = Double.NaN
+            var sleepMs = sleepFactorMs
+
+            // if the load average is not available, a negative value is returned
+            val load = osBean.getSystemLoadAverage()
+            if (load >= 0) {
+              loadFactor = load / availableProcessors
+              sleepMs = (loadFactor * sleepFactorMs).toInt
+            }
+
+            if (counter < maxRetries) {
+              // leave out logging of exception here, this helps to unclutter the logs
+              logger.log(Level.INFO, "Timeout error when retrieving abstract of " + pageTitle + ". Retrying after " + sleepMs + " ms. Load factor: " + loadFactor)
+              Thread.sleep(sleepMs)
+            }
+            else {
+              failedPagesLogger.log(Level.WARNING, "Ultimately failed to process page '" + pageTitle + "' after " + counter + " tries due to timeout error.")
+              logger.log(Level.INFO, "Timeout error when retrieving abstract of " + pageTitle + " in " + counter + " tries. Giving up. Load factor: " + loadFactor)
+            }
+          }
           case ex: Exception => {
             
             // The web server may still be trying to render the page. If we send new requests
@@ -167,6 +195,7 @@ extends PageNodeExtractor
               Thread.sleep(sleepMs)
             }
             else {
+              failedPagesLogger.log(Level.WARNING, "Ultimately failed to process page '" + pageTitle + "' after " + counter + " tries due to exception.", ex)
               logger.log(Level.INFO, "Error retrieving abstract of " + pageTitle + " in " + counter + " tries. Giving up. Load factor: " + loadFactor, ex)
             }
           }
